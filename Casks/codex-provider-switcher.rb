@@ -1,14 +1,14 @@
 cask "codex-provider-switcher" do
-  version "0.1.0"
+  version "0.1.1"
 
   on_arm do
-    url "https://github.com/Kgym-Hina/codex-profile-switcher/releases/download/v0.1.0/codex-provider-switcher-darwin-arm64.tar.gz"
-    sha256 "ecec6f1c791f953096a53e24f6f3c131a4c305c1e231da217b913048d42c0fdf"
+    url "https://github.com/Kgym-Hina/codex-profile-switcher/releases/download/v0.1.1/codex-provider-switcher-darwin-arm64.tar.gz"
+    sha256 "83eabea05f0e1c90a71b60fe0503011aa77a9474448fec646f71569e86528bf9"
   end
 
   on_intel do
-    url "https://github.com/Kgym-Hina/codex-profile-switcher/releases/download/v0.1.0/codex-provider-switcher-darwin-amd64.tar.gz"
-    sha256 "d13952842dd4a19706239dc3cc96418fdf5dfddf06e8fddd4dbfcdc10ddffbad"
+    url "https://github.com/Kgym-Hina/codex-profile-switcher/releases/download/v0.1.1/codex-provider-switcher-darwin-amd64.tar.gz"
+    sha256 "b3628894f20b32f1812b0828dd4a0de55e44d866cad906c250643a92b2dd50ca"
   end
 
   name "Codex Profile Switcher"
