@@ -13,13 +13,22 @@ import (
 var version = "dev"
 
 func main() {
-	configPath, codexHome, list, help, mode, err := parseArgs(os.Args[1:])
+	configPath, codexHome, list, help, mode, explicitConfig, err := parseArgs(os.Args[1:])
 	if err != nil {
 		fatal(err)
 	}
 	if help {
 		usage()
 		return
+	}
+	if !explicitConfig {
+		created, err := config.EnsureDefault(configPath)
+		if err != nil {
+			fatal(err)
+		}
+		if created {
+			fmt.Printf("已生成默认配置: %s\n", configPath)
+		}
 	}
 	profiles, err := config.Load(configPath)
 	if err != nil {
@@ -33,12 +42,13 @@ func main() {
 	}
 
 	if mode == "" {
-		statuses, err := switcher.Inspect(profiles, configPath, codexHome, os.Getenv("HOME"))
+		home := userHome()
+		statuses, err := switcher.Inspect(profiles, configPath, codexHome, home)
 		if err != nil {
 			fatal(err)
 		}
 		if err := tui.Run(statuses, func(index int) error {
-			return switcher.Apply(profiles[index], configPath, codexHome, os.Getenv("HOME"))
+			return switcher.Apply(profiles[index], configPath, codexHome, home)
 		}, os.Stdin, os.Stdout); err != nil {
 			fatal(err)
 		}
@@ -46,7 +56,7 @@ func main() {
 	}
 	for _, profile := range profiles {
 		if profile.Name == mode {
-			if err := switcher.Apply(profile, configPath, codexHome, os.Getenv("HOME")); err != nil {
+			if err := switcher.Apply(profile, configPath, codexHome, userHome()); err != nil {
 				fatal(err)
 			}
 			fmt.Printf("切换完成\n  mode: %s\n  provider: %s\n", profile.Name, profile.Provider)
@@ -56,12 +66,13 @@ func main() {
 	fatal(fmt.Errorf("预设模式不存在: %s", mode))
 }
 
-func parseArgs(args []string) (string, string, bool, bool, string, error) {
+func parseArgs(args []string) (string, string, bool, bool, string, bool, error) {
 	defaultConfig := defaultConfigPath()
-	defaultHome := filepath.Join(os.Getenv("HOME"), ".codex")
+	defaultHome := filepath.Join(userHome(), ".codex")
 	configPath, codexHome := defaultConfig, defaultHome
 	list, help := false, false
 	mode := ""
+	explicitConfig := false
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
 		case "--help", "-h":
@@ -70,48 +81,39 @@ func parseArgs(args []string) (string, string, bool, bool, string, error) {
 			list = true
 		case "--config":
 			if i+1 >= len(args) {
-				return "", "", false, false, "", fmt.Errorf("--config 需要一个文件路径")
+				return "", "", false, false, "", false, fmt.Errorf("--config 需要一个文件路径")
 			}
 			i++
+			explicitConfig = true
 			configPath = args[i]
 		case "--codex-home":
 			if i+1 >= len(args) {
-				return "", "", false, false, "", fmt.Errorf("--codex-home 需要一个目录路径")
+				return "", "", false, false, "", false, fmt.Errorf("--codex-home 需要一个目录路径")
 			}
 			i++
 			codexHome = args[i]
 		default:
 			if len(args[i]) > 1 && args[i][0] == '-' {
-				return "", "", false, false, "", fmt.Errorf("未知参数: %s", args[i])
+				return "", "", false, false, "", false, fmt.Errorf("未知参数: %s", args[i])
 			}
 			if mode != "" {
-				return "", "", false, false, "", fmt.Errorf("只允许指定一个 mode")
+				return "", "", false, false, "", false, fmt.Errorf("只允许指定一个 mode")
 			}
 			mode = args[i]
 		}
 	}
-	return configPath, codexHome, list, help, mode, nil
+	return configPath, codexHome, list, help, mode, explicitConfig, nil
 }
 
 func defaultConfigPath() string {
-	relative := filepath.Join("config", "provider-presets.json")
-	if cwd, err := os.Getwd(); err == nil {
-		candidate := filepath.Join(cwd, relative)
-		if _, err := os.Stat(candidate); err == nil {
-			return candidate
-		}
+	return filepath.Join(userHome(), ".config", "codex-provider-switcher", "provider-presets.json")
+}
+
+func userHome() string {
+	if home, err := os.UserHomeDir(); err == nil {
+		return home
 	}
-	if executable, err := os.Executable(); err == nil {
-		dir := filepath.Dir(executable)
-		for i := 0; i < 3; i++ {
-			candidate := filepath.Join(dir, relative)
-			if _, err := os.Stat(candidate); err == nil {
-				return candidate
-			}
-			dir = filepath.Dir(dir)
-		}
-	}
-	return relative
+	return os.Getenv("HOME")
 }
 
 func usage() {

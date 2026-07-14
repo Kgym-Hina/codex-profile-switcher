@@ -1,12 +1,16 @@
 package config
 
 import (
+	_ "embed"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
 )
+
+//go:embed default_provider_presets.json
+var defaultPresets []byte
 
 type Profile struct {
 	Name     string
@@ -16,6 +20,29 @@ type Profile struct {
 
 type file struct {
 	Presets map[string]Profile `json:"presets"`
+}
+
+func EnsureDefault(path string) (bool, error) {
+	if _, err := os.Stat(path); err == nil {
+		return false, nil
+	} else if !os.IsNotExist(err) {
+		return false, fmt.Errorf("检查预设配置失败: %w", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return false, fmt.Errorf("创建配置目录失败: %w", err)
+	}
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		if os.IsExist(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("创建默认预设配置失败: %w", err)
+	}
+	defer file.Close()
+	if _, err := file.Write(defaultPresets); err != nil {
+		return false, fmt.Errorf("写入默认预设配置失败: %w", err)
+	}
+	return true, nil
 }
 
 func Load(path string) ([]Profile, error) {

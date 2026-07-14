@@ -34,7 +34,7 @@ go run ./cmd/codex-provider-switch thirdparty-a --codex-home ~/.codex
 
 ## 配置
 
-默认配置文件是 `config/provider-presets.json`：
+默认配置文件是 `~/.config/codex-provider-switcher/provider-presets.json`。首次运行时，程序会从内置模板自动生成该文件，不依赖项目目录或当前运行目录：
 
 ```json
 {
@@ -48,6 +48,8 @@ go run ./cmd/codex-provider-switch thirdparty-a --codex-home ~/.codex
 ```
 
 `provider` 会写入 `config.toml` 的 `model_provider`，`auth_file` 是对应的认证文件路径。相对路径以配置文件所在目录为基准，也支持绝对路径和 `~/`。
+
+修改用户配置文件后重新启动程序即可生效。也可以通过 `--config PATH` 临时指定其他配置文件。
 
 ## 构建
 
@@ -63,7 +65,7 @@ go build -o codex-provider-switch ./cmd/codex-provider-switch
 GOOS=darwin GOARCH=arm64 go build -o codex-provider-switch-darwin-arm64 ./cmd/codex-provider-switch
 ```
 
-运行编译后的版本时，请从项目根目录执行，以便自动找到 `config/provider-presets.json`：
+运行编译后的版本：
 
 ```bash
 ./codex-provider-switch-darwin-arm64
