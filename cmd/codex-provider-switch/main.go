@@ -10,6 +10,8 @@ import (
 	"codex-profile-switcher/internal/tui"
 )
 
+var version = "dev"
+
 func main() {
 	configPath, codexHome, list, help, mode, err := parseArgs(os.Args[1:])
 	if err != nil {

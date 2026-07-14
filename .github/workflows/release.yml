@@ -1,0 +1,70 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-14
+
+    steps:
+      - name: Checkout tagged source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Build macOS archives
+        env:
+          VERSION: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          version="${VERSION#v}"
+          mkdir -p dist/arm64 dist/amd64
+
+          GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 \
+            go build -trimpath -ldflags "-s -w -X main.version=${version}" \
+            -o dist/arm64/codex-provider-switch ./cmd/codex-provider-switch
+          GOOS=darwin GOARCH=amd64 CGO_ENABLED=0 \
+            go build -trimpath -ldflags "-s -w -X main.version=${version}" \
+            -o dist/amd64/codex-provider-switch ./cmd/codex-provider-switch
+
+          tar -C dist/arm64 -czf "dist/codex-provider-switcher-darwin-arm64.tar.gz" codex-provider-switch
+          tar -C dist/amd64 -czf "dist/codex-provider-switcher-darwin-amd64.tar.gz" codex-provider-switch
+          shasum -a 256 dist/*.tar.gz > dist/SHA256SUMS
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ github.ref_name }}
+        run: |
+          gh release create "$VERSION" dist/*.tar.gz dist/SHA256SUMS \
+            --title "$VERSION" \
+            --generate-notes
+
+      - name: Update Cask in main
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          arm_sha="$(shasum -a 256 dist/codex-provider-switcher-darwin-arm64.tar.gz | awk '{print $1}')"
+          intel_sha="$(shasum -a 256 dist/codex-provider-switcher-darwin-amd64.tar.gz | awk '{print $1}')"
+
+          git fetch origin main
+          git checkout -B main origin/main
+          ruby scripts/generate-cask.rb "${VERSION#v}" "$arm_sha" "$intel_sha"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Casks/codex-provider-switcher.rb
+          git diff --cached --quiet || git commit -m "chore: update Homebrew cask for ${VERSION}"
+          git push origin main

@@ -75,3 +75,25 @@ GOOS=darwin GOARCH=arm64 go build -o codex-provider-switch-darwin-arm64 ./cmd/co
 go vet ./...
 go build ./...
 ```
+
+## Homebrew Cask
+
+推送形如 `v0.1.0` 的 Git tag 后，GitHub Actions 会自动：
+
+1. 构建 macOS Apple Silicon 和 Intel 版本
+2. 创建 GitHub Release 并上传归档包与 SHA256 校验文件
+3. 更新 `Casks/codex-provider-switcher.rb` 并提交回 `main`
+
+首次发布完成后，可以通过个人 Tap 安装：
+
+```bash
+brew tap kgym-hina/codex-profile-switcher https://github.com/Kgym-Hina/codex-profile-switcher.git
+brew install --cask codex-provider-switcher
+```
+
+发布新版本：
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
