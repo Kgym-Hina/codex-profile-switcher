@@ -1,0 +1,7 @@
+# Go build artifacts
+/codex-provider-switch
+/codex-provider-switch-*
+
+# IDE and OS files
+.idea/
+.DS_Store
