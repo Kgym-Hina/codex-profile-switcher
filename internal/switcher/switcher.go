@@ -2,10 +2,13 @@ package switcher
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
+	"strings"
 
 	"codex-profile-switcher/internal/config"
 )
@@ -18,34 +21,39 @@ type Status struct {
 	Reason    string
 }
 
-var providerLine = regexp.MustCompile(`(?m)^(model_provider\s*=\s*)"([^"]*)"(\s*)$`)
+var providerLine = regexp.MustCompile(`^(\s*model_provider\s*=\s*)(?:"[^"]*"|'[^']*')(\s*(?:#.*)?)$`)
+var providerValue = regexp.MustCompile(`^\s*model_provider\s*=\s*(?:"([^"]*)"|'([^']*)')\s*(?:#.*)?$`)
 
-func Inspect(profiles []config.Profile, configPath, codexHome, home string) ([]Status, error) {
-	configFile := filepath.Join(codexHome, "config.toml")
-	configData, err := os.ReadFile(configFile)
+func Inspect(profiles []config.Profile, activeProfile, configPath, codexHome, home string) ([]Status, error) {
+	configData, err := os.ReadFile(filepath.Join(codexHome, "config.toml"))
 	if err != nil {
 		return nil, fmt.Errorf("读取 Codex config.toml 失败: %w", err)
 	}
-	match := providerLine.FindSubmatch(configData)
-	currentProvider := ""
-	if len(match) > 0 {
-		currentProvider = string(match[2])
-	}
+	currentProvider := readProvider(configData)
 	currentAuth, authErr := os.ReadFile(filepath.Join(codexHome, "auth.json"))
 
 	statuses := make([]Status, 0, len(profiles))
 	for _, profile := range profiles {
 		authPath := config.ResolveAuthPath(profile.AuthFile, configPath, home)
-		status := Status{Profile: profile, AuthPath: authPath}
+		status := Status{Profile: profile, AuthPath: authPath, Active: profile.Name == activeProfile}
 		profileAuth, err := os.ReadFile(authPath)
 		if err != nil {
 			status.Reason = "认证文件不存在"
+			if status.Active {
+				status.Reason = "当前使用，备份文件缺失"
+			}
 			statuses = append(statuses, status)
 			continue
 		}
 		status.Available = true
-		status.Active = authErr == nil && currentProvider == profile.Provider && bytes.Equal(currentAuth, profileAuth)
-		if !status.Active {
+		switch {
+		case status.Active && currentProvider != profile.Provider:
+			status.Reason = "当前使用，provider 未同步"
+		case status.Active && authErr == nil && !bytes.Equal(currentAuth, profileAuth):
+			status.Reason = "当前使用，有待备份变更"
+		case status.Active:
+			status.Reason = "当前使用"
+		default:
 			status.Reason = "可切换"
 		}
 		statuses = append(statuses, status)
@@ -53,80 +61,213 @@ func Inspect(profiles []config.Profile, configPath, codexHome, home string) ([]S
 	return statuses, nil
 }
 
-func Apply(profile config.Profile, configPath, codexHome, home string) error {
+func DetectActive(profiles []config.Profile, configPath, codexHome, home string) (string, error) {
+	configData, err := os.ReadFile(filepath.Join(codexHome, "config.toml"))
+	if err != nil {
+		return "", fmt.Errorf("读取 Codex config.toml 失败: %w", err)
+	}
+	currentAuth, err := os.ReadFile(filepath.Join(codexHome, "auth.json"))
+	if err != nil {
+		return "", fmt.Errorf("读取 Codex auth.json 失败: %w", err)
+	}
+	provider := readProvider(configData)
+	exact := make([]string, 0, 1)
+	providerMatches := make([]string, 0, 1)
+	for _, profile := range profiles {
+		if profile.Provider != provider {
+			continue
+		}
+		providerMatches = append(providerMatches, profile.Name)
+		profileAuth, err := os.ReadFile(config.ResolveAuthPath(profile.AuthFile, configPath, home))
+		if err == nil && bytes.Equal(currentAuth, profileAuth) {
+			exact = append(exact, profile.Name)
+		}
+	}
+	if len(exact) > 0 {
+		return exact[0], nil
+	}
+	if len(providerMatches) == 1 {
+		return providerMatches[0], nil
+	}
+	return "", nil
+}
+
+func CurrentProvider(codexHome string) (string, error) {
+	data, err := os.ReadFile(filepath.Join(codexHome, "config.toml"))
+	if err != nil {
+		return "", fmt.Errorf("读取 Codex config.toml 失败: %w", err)
+	}
+	return readProvider(data), nil
+}
+
+func Apply(current *config.Profile, target config.Profile, configPath, codexHome, home string) error {
 	if info, err := os.Stat(codexHome); err != nil || !info.IsDir() {
 		return fmt.Errorf("Codex 目录不存在: %s", codexHome)
 	}
 	configFile := filepath.Join(codexHome, "config.toml")
-	if _, err := os.Stat(configFile); err != nil {
-		return fmt.Errorf("未找到 Codex config.toml: %w", err)
-	}
-	sourceAuth := config.ResolveAuthPath(profile.AuthFile, configPath, home)
-	if _, err := os.Stat(sourceAuth); err != nil {
-		return fmt.Errorf("缺少该模式对应的 auth 文件: %s", sourceAuth)
-	}
-	if err := updateProvider(configFile, profile.Provider); err != nil {
-		return err
-	}
-	return replaceAuth(sourceAuth, filepath.Join(codexHome, "auth.json"))
-}
-
-func updateProvider(path, provider string) error {
-	data, err := os.ReadFile(path)
+	authFile := filepath.Join(codexHome, "auth.json")
+	originalConfig, err := os.ReadFile(configFile)
 	if err != nil {
-		return fmt.Errorf("读取 config.toml 失败: %w", err)
+		return fmt.Errorf("读取 Codex config.toml 失败: %w", err)
 	}
-	if !providerLine.Match(data) {
-		return fmt.Errorf("config.toml 中未找到 model_provider = \"...\" 行")
+	originalAuth, err := os.ReadFile(authFile)
+	if err != nil {
+		return fmt.Errorf("读取当前认证文件失败: %w", err)
 	}
-	replaced := providerLine.ReplaceAllString(string(data), `${1}"`+provider+`"${3}`)
-	if err := os.WriteFile(path, []byte(replaced), 0o600); err != nil {
+	targetPath := config.ResolveAuthPath(target.AuthFile, configPath, home)
+	targetAuth, err := os.ReadFile(targetPath)
+	if err != nil {
+		return fmt.Errorf("缺少该 profile 对应的 auth 文件: %s", targetPath)
+	}
+	if !json.Valid(targetAuth) {
+		return fmt.Errorf("该 profile 的 auth 文件不是有效 JSON: %s", targetPath)
+	}
+
+	if current != nil {
+		currentPath := config.ResolveAuthPath(current.AuthFile, configPath, home)
+		if err := writeFileAtomic(currentPath, originalAuth, 0o600); err != nil {
+			return fmt.Errorf("备份当前 profile 的认证文件失败: %w", err)
+		}
+		if samePath(currentPath, targetPath) {
+			targetAuth = originalAuth
+		}
+	}
+
+	updatedConfig := updateProviderData(originalConfig, target.Provider)
+	if err := writeFileAtomic(configFile, updatedConfig, 0o600); err != nil {
 		return fmt.Errorf("更新 config.toml 失败: %w", err)
+	}
+	if err := writeFileAtomic(authFile, targetAuth, 0o600); err != nil {
+		if rollbackErr := writeFileAtomic(configFile, originalConfig, 0o600); rollbackErr != nil {
+			return fmt.Errorf("替换认证文件失败: %v；回滚 config.toml 也失败: %v", err, rollbackErr)
+		}
+		return fmt.Errorf("替换认证文件失败: %w", err)
 	}
 	return nil
 }
 
-func replaceAuth(source, target string) error {
-	sourceAbs, _ := filepath.Abs(source)
-	targetAbs, _ := filepath.Abs(target)
-	if sourceAbs == targetAbs {
-		return nil
+func SeedAuth(profile config.Profile, configPath, codexHome, home string) (bool, error) {
+	path := config.ResolveAuthPath(profile.AuthFile, configPath, home)
+	if _, err := os.Stat(path); err == nil {
+		return false, nil
+	} else if !os.IsNotExist(err) {
+		return false, fmt.Errorf("检查认证文件失败: %w", err)
 	}
-	data, err := os.ReadFile(source)
+	data, err := os.ReadFile(filepath.Join(codexHome, "auth.json"))
 	if err != nil {
-		return fmt.Errorf("读取认证文件失败: %w", err)
+		return false, fmt.Errorf("读取当前认证文件失败: %w", err)
 	}
-	info, err := os.Stat(target)
-	mode := os.FileMode(0o600)
-	if err == nil {
-		mode = info.Mode().Perm()
+	if err := writeFileAtomic(path, data, 0o600); err != nil {
+		return false, fmt.Errorf("创建 profile 认证文件失败: %w", err)
 	}
-	tmp, err := os.CreateTemp(filepath.Dir(target), ".auth.json.tmp-*")
+	return true, nil
+}
+
+func RemoveSeededAuth(profile config.Profile, configPath, home string) {
+	_ = os.Remove(config.ResolveAuthPath(profile.AuthFile, configPath, home))
+}
+
+func readProvider(data []byte) string {
+	start, end := topLevelProviderLine(data)
+	if start < 0 {
+		return ""
+	}
+	match := providerValue.FindSubmatch(data[start:end])
+	if len(match) == 0 {
+		return ""
+	}
+	if len(match[1]) > 0 {
+		return string(match[1])
+	}
+	return string(match[2])
+}
+
+func updateProviderData(data []byte, provider string) []byte {
+	value := strconv.Quote(provider)
+	lineStart, lineEnd := topLevelProviderLine(data)
+	if lineStart < 0 {
+		prefix := []byte("model_provider = " + value + "\n")
+		return append(prefix, data...)
+	}
+	match := providerLine.FindSubmatchIndex(data[lineStart:lineEnd])
+	if len(match) == 0 {
+		prefix := []byte("model_provider = " + value + "\n")
+		return append(prefix, data...)
+	}
+	for i := range match {
+		match[i] += lineStart
+	}
+	var updated bytes.Buffer
+	updated.Grow(len(data) + len(provider))
+	updated.Write(data[:match[0]])
+	updated.Write(data[match[2]:match[3]])
+	updated.WriteString(value)
+	updated.Write(data[match[4]:match[5]])
+	updated.Write(data[match[1]:])
+	return updated.Bytes()
+}
+
+func topLevelProviderLine(data []byte) (int, int) {
+	for start := 0; start <= len(data); {
+		end := bytes.IndexByte(data[start:], '\n')
+		if end < 0 {
+			end = len(data)
+		} else {
+			end += start
+		}
+		line := data[start:end]
+		trimmed := bytes.TrimSpace(line)
+		if len(trimmed) > 0 && trimmed[0] == '[' {
+			break
+		}
+		if providerLine.Match(line) {
+			return start, end
+		}
+		if end == len(data) {
+			break
+		}
+		start = end + 1
+	}
+	return -1, -1
+}
+
+func writeFileAtomic(path string, data []byte, fallbackMode os.FileMode) error {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(dir, ".codex-profile.tmp-*")
 	if err != nil {
-		return fmt.Errorf("创建认证临时文件失败: %w", err)
+		return err
 	}
 	tmpName := tmp.Name()
 	defer os.Remove(tmpName)
-	if err := tmp.Chmod(mode); err == nil {
-		_, err = tmp.Write(data)
+	if err := tmp.Chmod(fallbackMode); err != nil {
+		_ = tmp.Close()
+		return err
 	}
+	_, err = tmp.Write(data)
 	if closeErr := tmp.Close(); err == nil {
 		err = closeErr
 	}
 	if err != nil {
-		return fmt.Errorf("写入认证文件失败: %w", err)
+		return err
 	}
-	backup := target + ".bak"
-	_ = os.Remove(backup)
-	if _, err := os.Stat(target); err == nil {
-		if err := os.Rename(target, backup); err != nil {
-			return fmt.Errorf("备份认证文件失败: %w", err)
+	return os.Rename(tmpName, path)
+}
+
+func DefaultAuthFile(name string) string {
+	safe := strings.Map(func(r rune) rune {
+		if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '-' || r == '_' || r > 127 {
+			return r
 		}
-	}
-	if err := os.Rename(tmpName, target); err != nil {
-		_ = os.Rename(backup, target)
-		return fmt.Errorf("替换认证文件失败: %w", err)
-	}
-	_ = os.Remove(backup)
-	return nil
+		return '-'
+	}, strings.TrimSpace(name))
+	return "~/.codex/auth." + safe + ".json"
+}
+
+func samePath(left, right string) bool {
+	leftAbs, leftErr := filepath.Abs(left)
+	rightAbs, rightErr := filepath.Abs(right)
+	return leftErr == nil && rightErr == nil && leftAbs == rightAbs
 }

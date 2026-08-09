@@ -1,0 +1,179 @@
+package app
+
+import (
+	"fmt"
+	"strings"
+
+	"codex-profile-switcher/internal/config"
+	"codex-profile-switcher/internal/switcher"
+)
+
+type Service struct {
+	ConfigPath string
+	CodexHome  string
+	Home       string
+}
+
+func (s Service) Profiles() ([]config.Profile, error) {
+	value, err := config.Load(s.ConfigPath)
+	if err != nil {
+		return nil, err
+	}
+	return value.Profiles(), nil
+}
+
+func (s Service) Statuses() ([]switcher.Status, error) {
+	value, err := s.load()
+	if err != nil {
+		return nil, err
+	}
+	return switcher.Inspect(value.Profiles(), value.ActiveProfile, s.ConfigPath, s.CodexHome, s.Home)
+}
+
+func (s Service) Switch(name string) error {
+	value, err := s.load()
+	if err != nil {
+		return err
+	}
+	target, ok := profileByName(value, name)
+	if !ok {
+		return fmt.Errorf("profile %q 不存在", name)
+	}
+	var current *config.Profile
+	if active, ok := profileByName(value, value.ActiveProfile); ok {
+		current = &active
+	}
+	previousActive := value.ActiveProfile
+	value.ActiveProfile = target.Name
+	if err := config.Save(s.ConfigPath, value); err != nil {
+		return err
+	}
+	if err := switcher.Apply(current, target, s.ConfigPath, s.CodexHome, s.Home); err != nil {
+		value.ActiveProfile = previousActive
+		if rollbackErr := config.Save(s.ConfigPath, value); rollbackErr != nil {
+			return fmt.Errorf("%v；恢复当前 profile 标记也失败: %v", err, rollbackErr)
+		}
+		return err
+	}
+	return nil
+}
+
+func (s Service) Add(profile config.Profile) error {
+	value, err := s.load()
+	if err != nil {
+		return err
+	}
+	if err := value.SetProfile("", profile); err != nil {
+		return err
+	}
+	profile, _ = profileByName(value, strings.TrimSpace(profile.Name))
+	createdAuth, err := switcher.SeedAuth(profile, s.ConfigPath, s.CodexHome, s.Home)
+	if err != nil {
+		return err
+	}
+	if err := config.Save(s.ConfigPath, value); err != nil {
+		if createdAuth {
+			switcher.RemoveSeededAuth(profile, s.ConfigPath, s.Home)
+		}
+		return err
+	}
+	return nil
+}
+
+func (s Service) Edit(oldName string, profile config.Profile) error {
+	value, err := s.load()
+	if err != nil {
+		return err
+	}
+	oldProfile, ok := profileByName(value, oldName)
+	if !ok {
+		return fmt.Errorf("profile %q 不存在", oldName)
+	}
+	wasActive := value.ActiveProfile == oldName
+	if err := value.SetProfile(oldName, profile); err != nil {
+		return err
+	}
+	newName := profile.Name
+	if wasActive {
+		newName = value.ActiveProfile
+	}
+	profile, _ = profileByName(value, strings.TrimSpace(newName))
+	createdAuth := false
+	if wasActive {
+		createdAuth, err = switcher.SeedAuth(profile, s.ConfigPath, s.CodexHome, s.Home)
+		if err != nil {
+			return err
+		}
+	}
+	if err := config.Save(s.ConfigPath, value); err != nil {
+		if createdAuth {
+			switcher.RemoveSeededAuth(profile, s.ConfigPath, s.Home)
+		}
+		return err
+	}
+	if !wasActive {
+		return nil
+	}
+	if err := switcher.Apply(&oldProfile, profile, s.ConfigPath, s.CodexHome, s.Home); err != nil {
+		_ = value.SetProfile(profile.Name, oldProfile)
+		value.ActiveProfile = oldName
+		if rollbackErr := config.Save(s.ConfigPath, value); rollbackErr != nil {
+			return fmt.Errorf("%v；恢复 profile 配置也失败: %v", err, rollbackErr)
+		}
+		if createdAuth {
+			switcher.RemoveSeededAuth(profile, s.ConfigPath, s.Home)
+		}
+		return err
+	}
+	return nil
+}
+
+func (s Service) Delete(name string) error {
+	value, err := s.load()
+	if err != nil {
+		return err
+	}
+	if err := value.DeleteProfile(name); err != nil {
+		return err
+	}
+	return config.Save(s.ConfigPath, value)
+}
+
+func (s Service) load() (*config.Config, error) {
+	value, err := config.Load(s.ConfigPath)
+	if err != nil {
+		return nil, err
+	}
+	if len(value.Presets) == 0 {
+		return value, nil
+	}
+	if active, ok := profileByName(value, value.ActiveProfile); ok {
+		provider, err := switcher.CurrentProvider(s.CodexHome)
+		if err != nil {
+			return nil, err
+		}
+		if provider == "" || provider == active.Provider {
+			return value, nil
+		}
+	}
+	active, err := switcher.DetectActive(value.Profiles(), s.ConfigPath, s.CodexHome, s.Home)
+	if err != nil {
+		return nil, err
+	}
+	if active == value.ActiveProfile {
+		return value, nil
+	}
+	value.ActiveProfile = active
+	if err := config.Save(s.ConfigPath, value); err != nil {
+		return nil, err
+	}
+	return value, nil
+}
+
+func profileByName(value *config.Config, name string) (config.Profile, bool) {
+	profile, ok := value.Presets[name]
+	if ok {
+		profile.Name = name
+	}
+	return profile, ok
+}
