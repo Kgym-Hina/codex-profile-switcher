@@ -78,6 +78,8 @@ func main() {
 		Add:                  service.Add,
 		Edit:                 service.Edit,
 		Delete:               service.Delete,
+		Test:                 service.Test,
+		CurrentModel:         service.CurrentModel,
 		Restart:              restartCodex,
 		GetRestartPreference: service.RestartPreference,
 		SetRestartPreference: service.SetRestartPreference,

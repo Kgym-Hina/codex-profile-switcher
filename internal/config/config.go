@@ -17,6 +17,10 @@ type Profile struct {
 	Name     string `json:"-"`
 	Provider string `json:"provider"`
 	AuthFile string `json:"auth_file"`
+	AuthType string `json:"auth_type,omitempty"`
+	BaseURL  string `json:"base_url,omitempty"`
+	Model    string `json:"model,omitempty"`
+	APIKey   string `json:"-"`
 }
 
 type Config struct {
@@ -67,6 +71,7 @@ func Load(path string) (*Config, error) {
 	}
 	for name, profile := range parsed.Presets {
 		profile.Name = name
+		profile.AuthType = NormalizeAuthType(profile.AuthType, profile.Provider)
 		if err := ValidateProfile(profile); err != nil {
 			return nil, fmt.Errorf("预设 %q 无效: %w", name, err)
 		}
@@ -109,6 +114,9 @@ func (c *Config) SetProfile(oldName string, profile Profile) error {
 	profile.Name = strings.TrimSpace(profile.Name)
 	profile.Provider = strings.TrimSpace(profile.Provider)
 	profile.AuthFile = strings.TrimSpace(profile.AuthFile)
+	profile.AuthType = NormalizeAuthType(strings.TrimSpace(profile.AuthType), profile.Provider)
+	profile.BaseURL = strings.TrimSpace(profile.BaseURL)
+	profile.Model = strings.TrimSpace(profile.Model)
 	if err := ValidateProfile(profile); err != nil {
 		return err
 	}
@@ -126,7 +134,7 @@ func (c *Config) SetProfile(oldName string, profile Profile) error {
 			c.ActiveProfile = profile.Name
 		}
 	}
-	c.Presets[profile.Name] = Profile{Provider: profile.Provider, AuthFile: profile.AuthFile}
+	c.Presets[profile.Name] = Profile{Provider: profile.Provider, AuthFile: profile.AuthFile, AuthType: profile.AuthType, BaseURL: profile.BaseURL, Model: profile.Model}
 	return nil
 }
 
@@ -160,7 +168,23 @@ func ValidateProfile(profile Profile) error {
 	if strings.ContainsAny(profile.AuthFile, "\r\n") {
 		return fmt.Errorf("auth 文件路径不能包含换行符")
 	}
+	if profile.AuthType != "official" && profile.AuthType != "api" {
+		return fmt.Errorf("认证类型必须是 official 或 api")
+	}
+	if strings.ContainsAny(profile.BaseURL+profile.Model, "\r\n") {
+		return fmt.Errorf("base URL 和模型不能包含换行符")
+	}
 	return nil
+}
+
+func NormalizeAuthType(value, provider string) string {
+	if value == "official" || value == "api" {
+		return value
+	}
+	if provider == "openai" || provider == "" {
+		return "official"
+	}
+	return "api"
 }
 
 func ResolveAuthPath(raw, configPath, home string) string {

@@ -2,15 +2,18 @@
   "presets": {
     "official": {
       "provider": "openai",
-      "auth_file": "~/.codex/auth.official.json"
+      "auth_file": "~/.codex/auth.official.json",
+      "auth_type": "official"
     },
     "thirdparty-a": {
       "provider": "sub2api_gpt",
-      "auth_file": "~/.codex/auth.thirdparty-a.json"
+      "auth_file": "~/.codex/auth.thirdparty-a.json",
+      "auth_type": "api"
     },
     "thirdparty-b": {
       "provider": "sub2api_gpt",
-      "auth_file": "~/.codex/auth.thirdparty-b.json"
+      "auth_file": "~/.codex/auth.thirdparty-b.json",
+      "auth_type": "api"
     }
   }
 }

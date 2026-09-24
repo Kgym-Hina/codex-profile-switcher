@@ -28,6 +28,31 @@ func editForm(keys *keyReader, out io.Writer, initial config.Profile) (config.Pr
 		fmt.Fprint(out, "\x1b[?25l")
 		return config.Profile{}, false, err
 	}
+	authType := config.NormalizeAuthType(initial.AuthType, provider)
+	authType, ok, err = keys.readLine(out, "认证类型 (official/api): ", authType)
+	if err != nil || !ok {
+		fmt.Fprint(out, "\x1b[?25l")
+		return config.Profile{}, false, err
+	}
+	authType = strings.ToLower(strings.TrimSpace(authType))
+	baseURL, ok, err := keys.readLine(out, "API Endpoint（official 可留空）: ", initial.BaseURL)
+	if err != nil || !ok {
+		fmt.Fprint(out, "\x1b[?25l")
+		return config.Profile{}, false, err
+	}
+	model, ok, err := keys.readLine(out, "默认模型（可留空）: ", initial.Model)
+	if err != nil || !ok {
+		fmt.Fprint(out, "\x1b[?25l")
+		return config.Profile{}, false, err
+	}
+	apiKey := ""
+	if authType == "api" {
+		apiKey, ok, err = keys.readLine(out, "API Key（留空保持现有）: ", "")
+		if err != nil || !ok {
+			fmt.Fprint(out, "\x1b[?25l")
+			return config.Profile{}, false, err
+		}
+	}
 	authFile := initial.AuthFile
 	if authFile == "" {
 		authFile = switcher.DefaultAuthFile(name)
@@ -41,7 +66,18 @@ func editForm(keys *keyReader, out io.Writer, initial config.Profile) (config.Pr
 		Name:     strings.TrimSpace(name),
 		Provider: strings.TrimSpace(provider),
 		AuthFile: strings.TrimSpace(authFile),
+		AuthType: authType,
+		BaseURL:  strings.TrimSpace(baseURL),
+		Model:    strings.TrimSpace(model),
+		APIKey:   strings.TrimSpace(apiKey),
 	}, true, nil
+}
+
+func testModelForm(keys *keyReader, out io.Writer, initial string) (string, bool, error) {
+	fmt.Fprint(out, "\x1b[H\x1b[2J\x1b[?25h")
+	model, ok, err := keys.readLine(out, "测试模型: ", initial)
+	fmt.Fprint(out, "\x1b[?25l")
+	return strings.TrimSpace(model), ok, err
 }
 
 func confirmDelete(keys *keyReader, out io.Writer, name string) (bool, error) {

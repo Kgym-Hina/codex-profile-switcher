@@ -14,6 +14,8 @@ type Actions struct {
 	Add                  func(config.Profile) error
 	Edit                 func(string, config.Profile) error
 	Delete               func(string) error
+	Test                 func(string, string) (string, error)
+	CurrentModel         func() (string, error)
 	Restart              func() error
 	GetRestartPreference func() (restart, remembered bool, err error)
 	SetRestartPreference func(bool) error
@@ -118,6 +120,42 @@ func Run(actions Actions, in io.Reader, out io.Writer) error {
 			if err != nil {
 				return err
 			}
+		case "t":
+			if len(statuses) == 0 {
+				message = "没有可测试的 profile"
+				continue
+			}
+			if actions.Test == nil {
+				message = "当前版本不支持模型测试"
+				continue
+			}
+			name := statuses[selected].Name
+			if !statuses[selected].Available {
+				message = "该 profile 的认证文件为空或无效，请先填写真实凭据"
+				continue
+			}
+			model := statuses[selected].Model
+			if model == "" && actions.CurrentModel != nil {
+				model, err = actions.CurrentModel()
+				if err != nil {
+					message = "读取默认模型失败: " + err.Error()
+					continue
+				}
+			}
+			model, ok, err := testModelForm(keys, out, model)
+			if err != nil {
+				return err
+			}
+			if !ok {
+				message = "已取消测试"
+				continue
+			}
+			result, err := actions.Test(name, model)
+			if err != nil {
+				message = "测试失败: " + err.Error()
+				continue
+			}
+			message = "测试成功:\n" + result
 		case "d":
 			if len(statuses) == 0 {
 				message = "没有可删除的 profile"

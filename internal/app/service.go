@@ -83,6 +83,26 @@ func (s Service) SetRestartPreference(restart bool) error {
 	return config.Save(s.ConfigPath, value)
 }
 
+func (s Service) CurrentModel() (string, error) {
+	return switcher.CurrentModel(s.CodexHome)
+}
+
+func (s Service) Test(name, model string) (string, error) {
+	value, err := s.load()
+	if err != nil {
+		return "", err
+	}
+	profile, ok := profileByName(value, name)
+	if !ok {
+		return "", fmt.Errorf("profile %q 不存在", name)
+	}
+	if err := switcher.EnsureProfileConfig(s.CodexHome, profile); err != nil {
+		return "", err
+	}
+	authPath := config.ResolveAuthPath(profile.AuthFile, s.ConfigPath, s.Home)
+	return switcher.Test(s.CodexHome, authPath, profile.Provider, model)
+}
+
 func (s Service) Add(profile config.Profile) error {
 	value, err := s.load()
 	if err != nil {
@@ -91,7 +111,9 @@ func (s Service) Add(profile config.Profile) error {
 	if err := value.SetProfile("", profile); err != nil {
 		return err
 	}
+	apiKey := profile.APIKey
 	profile, _ = profileByName(value, strings.TrimSpace(profile.Name))
+	profile.APIKey = apiKey
 	createdAuth, err := switcher.SeedAuth(profile, s.ConfigPath, s.CodexHome, s.Home)
 	if err != nil {
 		return err
@@ -100,6 +122,9 @@ func (s Service) Add(profile config.Profile) error {
 		if createdAuth {
 			switcher.RemoveSeededAuth(profile, s.ConfigPath, s.Home)
 		}
+		return err
+	}
+	if err := switcher.EnsureProfileConfig(s.CodexHome, profile); err != nil {
 		return err
 	}
 	return nil
@@ -122,7 +147,9 @@ func (s Service) Edit(oldName string, profile config.Profile) error {
 	if wasActive {
 		newName = value.ActiveProfile
 	}
+	apiKey := profile.APIKey
 	profile, _ = profileByName(value, strings.TrimSpace(newName))
+	profile.APIKey = apiKey
 	createdAuth := false
 	if wasActive {
 		createdAuth, err = switcher.SeedAuth(profile, s.ConfigPath, s.CodexHome, s.Home)
@@ -137,7 +164,13 @@ func (s Service) Edit(oldName string, profile config.Profile) error {
 		return err
 	}
 	if !wasActive {
+		if err := switcher.EnsureProfileConfig(s.CodexHome, profile); err != nil {
+			return err
+		}
 		return nil
+	}
+	if err := switcher.EnsureProfileConfig(s.CodexHome, profile); err != nil {
+		return err
 	}
 	if err := switcher.Apply(&oldProfile, profile, s.ConfigPath, s.CodexHome, s.Home); err != nil {
 		_ = value.SetProfile(profile.Name, oldProfile)
@@ -177,6 +210,9 @@ func (s Service) load() (*config.Config, error) {
 	// switching profiles.
 	for _, profile := range value.Profiles() {
 		if _, err := switcher.SeedAuth(profile, s.ConfigPath, s.CodexHome, s.Home); err != nil {
+			return nil, err
+		}
+		if err := switcher.EnsureProfileConfig(s.CodexHome, profile); err != nil {
 			return nil, err
 		}
 	}

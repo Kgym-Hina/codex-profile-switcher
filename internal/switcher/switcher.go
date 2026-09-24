@@ -2,6 +2,7 @@ package switcher
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -10,6 +11,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"codex-profile-switcher/internal/config"
 )
@@ -24,6 +26,7 @@ type Status struct {
 
 var providerLine = regexp.MustCompile(`^(\s*model_provider\s*=\s*)(?:"[^"]*"|'[^']*')(\s*(?:#.*)?)$`)
 var providerValue = regexp.MustCompile(`^\s*model_provider\s*=\s*(?:"([^"]*)"|'([^']*)')\s*(?:#.*)?$`)
+var modelLine = regexp.MustCompile(`^\s*model\s*=\s*(?:"([^"]*)"|'([^']*)')\s*(?:#.*)?$`)
 
 func Inspect(profiles []config.Profile, activeProfile, configPath, codexHome, home string) ([]Status, error) {
 	configData, err := os.ReadFile(filepath.Join(codexHome, "config.toml"))
@@ -38,10 +41,17 @@ func Inspect(profiles []config.Profile, activeProfile, configPath, codexHome, ho
 		authPath := config.ResolveAuthPath(profile.AuthFile, configPath, home)
 		status := Status{Profile: profile, AuthPath: authPath, Active: profile.Name == activeProfile}
 		profileAuth, err := os.ReadFile(authPath)
-		if err != nil {
+		if err != nil || !ValidAuth(profileAuth) {
 			status.Reason = "认证文件不存在"
+			if err == nil {
+				status.Reason = "认证文件为空或无效"
+			}
 			if status.Active {
-				status.Reason = "当前使用，备份文件缺失"
+				if err == nil {
+					status.Reason = "当前使用，备份文件为空或无效"
+				} else {
+					status.Reason = "当前使用，备份文件缺失"
+				}
 			}
 			statuses = append(statuses, status)
 			continue
@@ -120,7 +130,7 @@ func Apply(current *config.Profile, target config.Profile, configPath, codexHome
 	if err != nil {
 		return fmt.Errorf("缺少该 profile 对应的 auth 文件: %s", targetPath)
 	}
-	if !json.Valid(targetAuth) {
+	if !ValidAuth(targetAuth) {
 		return fmt.Errorf("该 profile 的 auth 文件不是有效 JSON: %s", targetPath)
 	}
 
@@ -134,7 +144,7 @@ func Apply(current *config.Profile, target config.Profile, configPath, codexHome
 		}
 	}
 
-	updatedConfig := updateProviderData(originalConfig, target.Provider)
+	updatedConfig := EnsureProviderData(originalConfig, target)
 	if err := writeFileAtomic(configFile, updatedConfig, 0o600); err != nil {
 		return fmt.Errorf("更新 config.toml 失败: %w", err)
 	}
@@ -161,6 +171,109 @@ func RepairHistory(codexHome, fromProvider, toProvider string) error {
 		return err
 	}
 	return repairSQLiteIndexes(codexHome, fromProvider, toProvider)
+}
+
+// ValidAuth accepts JSON object snapshots with at least one field. An empty
+// file or {} is not a usable Codex credential snapshot.
+func ValidAuth(data []byte) bool {
+	if len(bytes.TrimSpace(data)) == 0 || !json.Valid(data) {
+		return false
+	}
+	var object map[string]json.RawMessage
+	if err := json.Unmarshal(data, &object); err != nil {
+		return false
+	}
+	if key, ok := object["OPENAI_API_KEY"]; ok {
+		var value string
+		if json.Unmarshal(key, &value) == nil && strings.TrimSpace(value) != "" {
+			return true
+		}
+	}
+	if tokens, ok := object["tokens"]; ok {
+		var value map[string]json.RawMessage
+		return json.Unmarshal(tokens, &value) == nil && len(value) > 0
+	}
+	return false
+}
+
+func CurrentModel(codexHome string) (string, error) {
+	data, err := os.ReadFile(filepath.Join(codexHome, "config.toml"))
+	if err != nil {
+		return "", fmt.Errorf("读取 Codex config.toml 失败: %w", err)
+	}
+	for start := 0; start <= len(data); {
+		end := bytes.IndexByte(data[start:], '\n')
+		if end < 0 {
+			end = len(data)
+		} else {
+			end += start
+		}
+		match := modelLine.FindSubmatch(data[start:end])
+		if len(match) > 0 {
+			if len(match[1]) > 0 {
+				return string(match[1]), nil
+			}
+			return string(match[2]), nil
+		}
+		if end == len(data) {
+			break
+		}
+		start = end + 1
+	}
+	return "", nil
+}
+
+// Test sends one harmless hello prompt through the installed Codex CLI using
+// a temporary CODEX_HOME containing the selected profile.
+func Test(codexHome, authPath, provider, model string) (string, error) {
+	model = strings.TrimSpace(model)
+	if model == "" || strings.ContainsAny(model, "\r\n") {
+		return "", fmt.Errorf("模型不能为空且不能包含换行符")
+	}
+	configData, err := os.ReadFile(filepath.Join(codexHome, "config.toml"))
+	if err != nil {
+		return "", fmt.Errorf("读取 Codex config.toml 失败: %w", err)
+	}
+	authData, err := os.ReadFile(authPath)
+	if err != nil || !ValidAuth(authData) {
+		return "", fmt.Errorf("认证文件为空或无效: %s", authPath)
+	}
+	testHome, err := os.MkdirTemp("", "codex-profile-test-")
+	if err != nil {
+		return "", fmt.Errorf("创建测试目录失败: %w", err)
+	}
+	defer os.RemoveAll(testHome)
+	testProfile := config.Profile{Provider: provider, BaseURL: ""}
+	if err := writeFileAtomic(filepath.Join(testHome, "config.toml"), EnsureProviderData(configData, testProfile), 0o600); err != nil {
+		return "", fmt.Errorf("准备测试配置失败: %w", err)
+	}
+	if err := writeFileAtomic(filepath.Join(testHome, "auth.json"), authData, 0o600); err != nil {
+		return "", fmt.Errorf("准备测试认证失败: %w", err)
+	}
+	codex, err := exec.LookPath("codex")
+	if err != nil {
+		codex, err = exec.LookPath("codex++")
+	}
+	if err != nil {
+		return "", fmt.Errorf("找不到 codex 客户端")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, codex, "exec", "--ephemeral", "--skip-git-repo-check", "--color", "never", "--sandbox", "read-only", "--model", model, "hello")
+	cmd.Dir = codexHome
+	cmd.Env = append(os.Environ(), "CODEX_HOME="+testHome)
+	output, err := cmd.CombinedOutput()
+	result := strings.TrimSpace(string(output))
+	if ctx.Err() != nil {
+		return result, fmt.Errorf("模型测试超时")
+	}
+	if err != nil {
+		if result != "" {
+			return result, fmt.Errorf("模型测试失败: %w", err)
+		}
+		return "", fmt.Errorf("模型测试失败: %w", err)
+	}
+	return result, nil
 }
 
 func repairRollouts(root, fromProvider, toProvider string) error {
@@ -233,19 +346,114 @@ func repairSQLiteIndexes(codexHome, fromProvider, toProvider string) error {
 
 func SeedAuth(profile config.Profile, configPath, codexHome, home string) (bool, error) {
 	path := config.ResolveAuthPath(profile.AuthFile, configPath, home)
-	if _, err := os.Stat(path); err == nil {
-		return false, nil
+	if data, err := os.ReadFile(path); err == nil {
+		if ValidAuth(data) {
+			return false, nil
+		}
+		if profile.APIKey == "" {
+			return false, nil
+		}
 	} else if !os.IsNotExist(err) {
 		return false, fmt.Errorf("检查认证文件失败: %w", err)
 	}
-	data, err := os.ReadFile(filepath.Join(codexHome, "auth.json"))
-	if err != nil {
-		return false, fmt.Errorf("读取当前认证文件失败: %w", err)
+	data := []byte{}
+	if profile.APIKey != "" {
+		encoded, err := json.Marshal(map[string]string{"OPENAI_API_KEY": profile.APIKey})
+		if err != nil {
+			return false, fmt.Errorf("生成 API key 认证文件失败: %w", err)
+		}
+		data = encoded
 	}
 	if err := writeFileAtomic(path, data, 0o600); err != nil {
 		return false, fmt.Errorf("创建 profile 认证文件失败: %w", err)
 	}
 	return true, nil
+}
+
+// EnsureProviderData updates the active provider and records the provider
+// details needed by Codex for a newly-created API profile.
+func EnsureProviderData(data []byte, profile config.Profile) []byte {
+	updated := updateProviderData(data, profile.Provider)
+	return ensureProviderTableData(updated, profile)
+}
+
+func ensureProviderTableData(data []byte, profile config.Profile) []byte {
+	if profile.BaseURL == "" || profile.Provider == "openai" || providerTableExists(data, profile.Provider) {
+		return data
+	}
+	name := strconv.Quote(profile.Provider)
+	baseURL := strconv.Quote(profile.BaseURL)
+	block := fmt.Sprintf("\n[model_providers.%s]\nname = %s\nbase_url = %s\nwire_api = \"responses\"\n", profile.Provider, name, baseURL)
+	return append(data, []byte(block)...)
+}
+
+func EnsureProfileData(data []byte, profile config.Profile) []byte {
+	section := fmt.Sprintf("[profiles.%s]", strconv.Quote(profile.Name))
+	lines := bytes.SplitAfter(data, []byte("\n"))
+	inside := false
+	found := false
+	providerWritten := false
+	for i, raw := range lines {
+		line := bytes.TrimSuffix(raw, []byte("\n"))
+		trimmed := strings.TrimSpace(string(line))
+		if strings.HasPrefix(trimmed, "[") {
+			if inside && found && !providerWritten {
+				insert := []byte("model_provider = " + strconv.Quote(profile.Provider) + "\n")
+				lines = append(lines[:i], append([][]byte{insert}, lines[i:]...)...)
+				return bytes.Join(lines, nil)
+			}
+			inside = trimmed == section
+			if inside {
+				found = true
+				providerWritten = false
+			}
+			continue
+		}
+		if !inside {
+			continue
+		}
+		if strings.HasPrefix(trimmed, "model_provider") {
+			newline := []byte("model_provider = " + strconv.Quote(profile.Provider))
+			if bytes.HasSuffix(raw, []byte("\n")) {
+				newline = append(newline, '\n')
+			}
+			lines[i] = newline
+			providerWritten = true
+		}
+	}
+	if found && providerWritten {
+		return bytes.Join(lines, nil)
+	}
+	if found {
+		if len(lines) > 0 && !bytes.HasSuffix(lines[len(lines)-1], []byte("\n")) {
+			lines[len(lines)-1] = append(lines[len(lines)-1], '\n')
+		}
+		return bytes.Join(append(lines, []byte("model_provider = "+strconv.Quote(profile.Provider)+"\n")), nil)
+	}
+	block := fmt.Sprintf("\n%s\nmodel_provider = %s\n", section, strconv.Quote(profile.Provider))
+	return append(data, []byte(block)...)
+}
+
+func EnsureProfileConfig(codexHome string, profile config.Profile) error {
+	path := filepath.Join(codexHome, "config.toml")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("读取 Codex config.toml 失败: %w", err)
+	}
+	updated := EnsureProfileData(data, profile)
+	if profile.BaseURL != "" {
+		updated = ensureProviderTableData(updated, profile)
+	}
+	if bytes.Equal(data, updated) {
+		return nil
+	}
+	return writeFileAtomic(path, updated, 0o600)
+}
+
+func providerTableExists(data []byte, provider string) bool {
+	quoted := regexp.QuoteMeta(provider)
+	pattern := regexp.MustCompile(`(?m)^\s*\[model_providers\.` + quoted + `\]\s*$`)
+	return pattern.Match(data)
 }
 
 func RemoveSeededAuth(profile config.Profile, configPath, home string) {

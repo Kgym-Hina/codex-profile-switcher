@@ -12,13 +12,16 @@
 - 编辑时可以修改 profile 名称、provider 和认证文件路径等全部 profile 字段。
 - 删除 profile 只删除配置，不删除认证文件；当前使用中的 profile 需要先切换后才能删除。
 - 自动显示 provider、认证文件是否可用、当前使用状态和待同步状态。
-- 配置文件不存在时自动创建默认配置；profile 的认证快照不存在时自动从当前 `auth.json` 创建。
+- 配置文件不存在时自动创建默认配置；profile 的认证快照不存在时创建为空文件并显示为不可用，不会伪造或复制 API key。
+- 支持官方账号认证（`tokens` 等 Codex token 数据）和第三方 API key 认证。
+- 新增或编辑 profile 时可以设置认证类型、API endpoint 和默认模型；API key 只写入该 profile 的认证文件，不写入 presets 配置。
 
 ### Codex 文件同步
 
 - 切换前把当前 `~/.codex/auth.json` 的最新内容写回原 profile 认证文件，避免 token 刷新丢失。
 - 将目标 profile 的认证文件写入当前 `auth.json`。
 - 将目标 provider 写入 `config.toml` 的 `model_provider`。
+- 为 profile 写入 `config.toml` 中对应的 `[profiles."名称"]` 配置；填写 endpoint 时同时创建 `[model_providers.<provider>]` 配置。
 - 配置、认证文件和 profile 配置均使用原子写入。
 - 切换失败时恢复 profile 标记和 `config.toml`；认证写入失败时恢复原配置。
 - 支持绝对路径、`~/` 路径和相对于 profile 配置文件的认证路径。
@@ -56,7 +59,8 @@ TUI 快捷键：
 
 - `↑` / `↓`：选择 profile
 - `Enter`：切换到选中的 profile
-- `a`：新增 profile；认证文件不存在时会复制当前 `auth.json`
+- `t`：选择模型并发送一次 `hello` 测试请求
+- `a`：新增 profile；可选择官方认证或第三方 API，并填写 endpoint、模型和 API key
 - `e`：编辑选中的 profile
 - `d`：删除选中的 profile（保留认证文件）
 - `q` 或 `Esc`：退出
@@ -82,7 +86,9 @@ go run ./cmd/codex-provider-switch thirdparty-a --codex-home ~/.codex
   "presets": {
     "official": {
       "provider": "openai",
-      "auth_file": "~/.codex/auth.official.json"
+      "auth_file": "~/.codex/auth.official.json",
+      "auth_type": "official",
+      "model": "gpt-5"
     }
   }
 }
@@ -90,9 +96,9 @@ go run ./cmd/codex-provider-switch thirdparty-a --codex-home ~/.codex
 
 `active_profile` 由程序自动维护，用于可靠记录当前 profile。旧版配置首次运行时会根据 `model_provider` 和 `auth.json` 自动识别并补充该字段。
 
-`provider` 会自动写入 `config.toml` 的 `model_provider`，`auth_file` 是对应的认证文件路径。相对路径以配置文件所在目录为基准，也支持绝对路径和 `~/`。切换时，程序先把当前 `auth.json` 保存到原 profile，再载入目标 profile 的认证文件，因此 Codex 运行期间发生的 token 更新不会丢失。
+`provider` 会自动写入 `config.toml` 的 `model_provider`，`auth_file` 是对应的认证文件路径。`auth_type` 可设为 `official` 或 `api`；第三方 profile 可以额外设置 `base_url` 和 `model`。相对路径以配置文件所在目录为基准，也支持绝对路径和 `~/`。切换时，程序先把当前 `auth.json` 保存到原 profile，再载入目标 profile 的认证文件，因此 Codex 运行期间发生的 token 更新不会丢失。
 
-程序会在配置文件所在目录创建缺失的父目录和 profile 认证目录。缺失的 profile 认证文件会复制当前 `auth.json`；如果当前 `auth.json` 本身不存在，程序会报告错误，不会生成空认证文件。
+程序会在配置文件所在目录创建缺失的父目录和 profile 认证目录。缺失的 profile 认证文件会创建为空文件，空文件不会被标记为可用，也不能用于切换或模型测试。API profile 在 TUI 中填写 API key 后，程序会把它写入对应认证文件的 `OPENAI_API_KEY` 字段。
 
 当前使用中的 profile 不能直接删除，需要先切换到其他 profile。删除操作只移除 profile 配置，不删除认证文件。
 
