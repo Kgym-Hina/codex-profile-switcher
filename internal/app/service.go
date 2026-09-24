@@ -55,7 +55,32 @@ func (s Service) Switch(name string) error {
 		}
 		return err
 	}
+	if current != nil {
+		if err := switcher.RepairHistory(s.CodexHome, current.Provider, target.Provider); err != nil {
+			return fmt.Errorf("修复历史会话归属失败: %w", err)
+		}
+	}
 	return nil
+}
+
+func (s Service) RestartPreference() (bool, bool, error) {
+	value, err := config.Load(s.ConfigPath)
+	if err != nil {
+		return false, false, err
+	}
+	if value.RestartAfterSwitch == nil {
+		return false, false, nil
+	}
+	return *value.RestartAfterSwitch, true, nil
+}
+
+func (s Service) SetRestartPreference(restart bool) error {
+	value, err := s.load()
+	if err != nil {
+		return err
+	}
+	value.RestartAfterSwitch = &restart
+	return config.Save(s.ConfigPath, value)
 }
 
 func (s Service) Add(profile config.Profile) error {
@@ -146,6 +171,14 @@ func (s Service) load() (*config.Config, error) {
 	}
 	if len(value.Presets) == 0 {
 		return value, nil
+	}
+	// A profile is usable as soon as it is configured. If its snapshot was
+	// removed, recreate it from the live auth state before inspecting or
+	// switching profiles.
+	for _, profile := range value.Profiles() {
+		if _, err := switcher.SeedAuth(profile, s.ConfigPath, s.CodexHome, s.Home); err != nil {
+			return nil, err
+		}
 	}
 	if active, ok := profileByName(value, value.ActiveProfile); ok {
 		provider, err := switcher.CurrentProvider(s.CodexHome)

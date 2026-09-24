@@ -20,8 +20,9 @@ type Profile struct {
 }
 
 type Config struct {
-	ActiveProfile string             `json:"active_profile,omitempty"`
-	Presets       map[string]Profile `json:"presets"`
+	ActiveProfile      string             `json:"active_profile,omitempty"`
+	RestartAfterSwitch *bool              `json:"restart_after_switch,omitempty"`
+	Presets            map[string]Profile `json:"presets"`
 }
 
 func EnsureDefault(path string) (bool, error) {

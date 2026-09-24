@@ -9,11 +9,14 @@ import (
 )
 
 type Actions struct {
-	Reload func() ([]switcher.Status, error)
-	Switch func(string) error
-	Add    func(config.Profile) error
-	Edit   func(string, config.Profile) error
-	Delete func(string) error
+	Reload               func() ([]switcher.Status, error)
+	Switch               func(string) error
+	Add                  func(config.Profile) error
+	Edit                 func(string, config.Profile) error
+	Delete               func(string) error
+	Restart              func() error
+	GetRestartPreference func() (restart, remembered bool, err error)
+	SetRestartPreference func(bool) error
 }
 
 func Run(actions Actions, in io.Reader, out io.Writer) error {
@@ -57,6 +60,17 @@ func Run(actions Actions, in io.Reader, out io.Writer) error {
 			if err := actions.Switch(statuses[selected].Name); err != nil {
 				message = "切换失败: " + err.Error()
 				continue
+			}
+			restart, _, err := restartChoice(keys, out, actions)
+			if err != nil {
+				return err
+			}
+			if restart && actions.Restart != nil {
+				if err := actions.Restart(); err != nil {
+					message = "重启 Codex 失败: " + err.Error()
+				} else {
+					return nil
+				}
 			}
 			message = "已切换到 " + statuses[selected].Name
 			statuses, selected, err = reload(actions, statuses[selected].Name, selected)
@@ -129,6 +143,45 @@ func Run(actions Actions, in io.Reader, out io.Writer) error {
 			}
 		case "q", "esc":
 			return nil
+		}
+	}
+}
+
+func restartChoice(keys *keyReader, out io.Writer, actions Actions) (bool, bool, error) {
+	if actions.GetRestartPreference != nil {
+		if restart, remembered, err := actions.GetRestartPreference(); err != nil {
+			return false, false, err
+		} else if remembered {
+			return restart, true, nil
+		}
+	}
+	fmt.Fprint(out, "\x1b[H\x1b[2J\x1b[?25h")
+	fmt.Fprintln(out, "切换完成。现在重启 Codex？")
+	fmt.Fprintln(out, "r 重启   n 不重启   a 重启并记住   d 不重启并记住")
+	for {
+		key, err := keys.readKey()
+		if err != nil {
+			return false, false, err
+		}
+		switch key {
+		case "r":
+			return true, false, nil
+		case "n", "esc":
+			return false, false, nil
+		case "a":
+			if actions.SetRestartPreference != nil {
+				if err := actions.SetRestartPreference(true); err != nil {
+					return false, false, err
+				}
+			}
+			return true, true, nil
+		case "d":
+			if actions.SetRestartPreference != nil {
+				if err := actions.SetRestartPreference(false); err != nil {
+					return false, false, err
+				}
+			}
+			return false, true, nil
 		}
 	}
 }

@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 
 	"codex-profile-switcher/internal/app"
 	"codex-profile-switcher/internal/config"
@@ -71,14 +73,39 @@ func main() {
 	}
 
 	actions := tui.Actions{
-		Reload: service.Statuses,
-		Switch: service.Switch,
-		Add:    service.Add,
-		Edit:   service.Edit,
-		Delete: service.Delete,
+		Reload:               service.Statuses,
+		Switch:               service.Switch,
+		Add:                  service.Add,
+		Edit:                 service.Edit,
+		Delete:               service.Delete,
+		Restart:              restartCodex,
+		GetRestartPreference: service.RestartPreference,
+		SetRestartPreference: service.SetRestartPreference,
 	}
 	if err := tui.Run(actions, os.Stdin, os.Stdout); err != nil && !errors.Is(err, io.EOF) {
 		fatal(err)
+	}
+}
+
+func restartCodex() error {
+	switch runtime.GOOS {
+	case "darwin":
+		_ = exec.Command("osascript", "-e", `tell application "Codex" to quit`).Run()
+		return exec.Command("open", "-a", "Codex").Start()
+	case "windows":
+		_ = exec.Command("taskkill", "/IM", "codex.exe", "/T", "/F").Run()
+		path, err := exec.LookPath("codex.exe")
+		if err != nil {
+			return err
+		}
+		return exec.Command(path).Start()
+	default:
+		_ = exec.Command("pkill", "-x", "codex").Run()
+		path, err := exec.LookPath("codex")
+		if err != nil {
+			return err
+		}
+		return exec.Command(path).Start()
 	}
 }
 

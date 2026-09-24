@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -142,6 +143,90 @@ func Apply(current *config.Profile, target config.Profile, configPath, codexHome
 			return fmt.Errorf("替换认证文件失败: %v；回滚 config.toml 也失败: %v", err, rollbackErr)
 		}
 		return fmt.Errorf("替换认证文件失败: %w", err)
+	}
+	return nil
+}
+
+// RepairHistory updates the provider bucket used by Codex to list existing
+// sessions. Only session metadata and the local thread index are changed;
+// rollout conversation records are left untouched.
+func RepairHistory(codexHome, fromProvider, toProvider string) error {
+	if fromProvider == "" || toProvider == "" || fromProvider == toProvider {
+		return nil
+	}
+	if err := repairRollouts(filepath.Join(codexHome, "sessions"), fromProvider, toProvider); err != nil {
+		return err
+	}
+	if err := repairRollouts(filepath.Join(codexHome, "archived_sessions"), fromProvider, toProvider); err != nil {
+		return err
+	}
+	return repairSQLiteIndexes(codexHome, fromProvider, toProvider)
+}
+
+func repairRollouts(root, fromProvider, toProvider string) error {
+	if _, err := os.Stat(root); os.IsNotExist(err) {
+		return nil
+	} else if err != nil {
+		return err
+	}
+	return filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
+		if err != nil || entry.IsDir() || filepath.Ext(path) != ".jsonl" {
+			return err
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		lines := bytes.SplitAfter(data, []byte("\n"))
+		if len(lines) == 0 {
+			return nil
+		}
+		line := bytes.TrimSuffix(lines[0], []byte("\n"))
+		var record map[string]interface{}
+		if json.Unmarshal(line, &record) != nil || record["type"] != "session_meta" {
+			return nil
+		}
+		payload, ok := record["payload"].(map[string]interface{})
+		if !ok || payload["model_provider"] != fromProvider {
+			return nil
+		}
+		payload["model_provider"] = toProvider
+		updated, err := json.Marshal(record)
+		if err != nil {
+			return err
+		}
+		lines[0] = append(updated, '\n')
+		if !bytes.HasSuffix(data, []byte("\n")) {
+			lines[0] = bytes.TrimSuffix(lines[0], []byte("\n"))
+		}
+		mode := os.FileMode(0o600)
+		if info, statErr := os.Stat(path); statErr == nil {
+			mode = info.Mode().Perm()
+		}
+		return writeFileAtomic(path, bytes.Join(lines, nil), mode)
+	})
+}
+
+func repairSQLiteIndexes(codexHome, fromProvider, toProvider string) error {
+	sqlite, err := exec.LookPath("sqlite3")
+	if err != nil {
+		return nil
+	}
+	paths := []string{filepath.Join(codexHome, "state_5.sqlite"), filepath.Join(codexHome, "state.db")}
+	if matches, globErr := filepath.Glob(filepath.Join(codexHome, "sqlite", "*.db")); globErr == nil {
+		paths = append(paths, matches...)
+	}
+	for _, path := range paths {
+		if _, err := os.Stat(path); err != nil {
+			continue
+		}
+		from := strings.ReplaceAll(fromProvider, "'", "''")
+		to := strings.ReplaceAll(toProvider, "'", "''")
+		query := fmt.Sprintf("UPDATE threads SET model_provider='%s' WHERE model_provider='%s'; UPDATE local_thread_catalog SET model_provider='%s' WHERE model_provider='%s';", to, from, to, from)
+		cmd := exec.Command(sqlite, path, query)
+		if output, err := cmd.CombinedOutput(); err != nil && len(output) > 0 && !bytes.Contains(output, []byte("no such table")) {
+			return fmt.Errorf("修复 Codex 会话索引失败: %w", err)
+		}
 	}
 	return nil
 }
