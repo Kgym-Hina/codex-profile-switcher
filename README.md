@@ -148,6 +148,12 @@ brew install --cask codex-provider-switcher
 codex-provider-switch
 ```
 
+如果 macOS 将未公证的下载文件隔离，导致命令直接以退出码 137 结束，请先确认安装来源，再移除该文件的隔离属性：
+
+```bash
+xattr -d com.apple.quarantine "$(readlink "$(command -v codex-provider-switch)")"
+```
+
 升级到最新版本：
 
 ```bash
