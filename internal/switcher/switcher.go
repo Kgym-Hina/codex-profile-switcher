@@ -24,6 +24,21 @@ type Status struct {
 	Reason    string
 }
 
+func SessionProvider(profile config.Profile) string {
+	if config.NormalizeAuthType(profile.AuthType, profile.Provider) == "official" {
+		return "openai"
+	}
+	return profile.Provider
+}
+
+// An absent top-level selector is Codex's built-in OpenAI provider.
+func effectiveProvider(provider string) string {
+	if provider == "" {
+		return "openai"
+	}
+	return provider
+}
+
 var providerLine = regexp.MustCompile(`^(\s*model_provider\s*=\s*)(?:"[^"]*"|'[^']*')(\s*(?:#.*)?)$`)
 var providerValue = regexp.MustCompile(`^\s*model_provider\s*=\s*(?:"([^"]*)"|'([^']*)')\s*(?:#.*)?$`)
 var modelLine = regexp.MustCompile(`^\s*model\s*=\s*(?:"([^"]*)"|'([^']*)')\s*(?:#.*)?$`)
@@ -58,7 +73,7 @@ func Inspect(profiles []config.Profile, activeProfile, configPath, codexHome, ho
 		}
 		status.Available = true
 		switch {
-		case status.Active && currentProvider != profile.Provider:
+		case status.Active && effectiveProvider(currentProvider) != SessionProvider(profile):
 			status.Reason = "当前使用，provider 未同步"
 		case status.Active && authErr == nil && !bytes.Equal(currentAuth, profileAuth):
 			status.Reason = "当前使用，有待备份变更"
@@ -81,14 +96,18 @@ func DetectActive(profiles []config.Profile, configPath, codexHome, home string)
 	if err != nil {
 		return "", fmt.Errorf("读取 Codex auth.json 失败: %w", err)
 	}
-	provider := readProvider(configData)
+	provider := effectiveProvider(readProvider(configData))
 	exact := make([]string, 0, 1)
 	providerMatches := make([]string, 0, 1)
 	for _, profile := range profiles {
-		if profile.Provider != provider {
+		matchesProvider := SessionProvider(profile) == provider
+		legacyOfficial := config.NormalizeAuthType(profile.AuthType, profile.Provider) == "official" && profile.Provider == provider
+		if !matchesProvider && !legacyOfficial {
 			continue
 		}
-		providerMatches = append(providerMatches, profile.Name)
+		if matchesProvider {
+			providerMatches = append(providerMatches, profile.Name)
+		}
 		profileAuth, err := os.ReadFile(config.ResolveAuthPath(profile.AuthFile, configPath, home))
 		if err == nil && bytes.Equal(currentAuth, profileAuth) {
 			exact = append(exact, profile.Name)
@@ -108,7 +127,7 @@ func CurrentProvider(codexHome string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("读取 Codex config.toml 失败: %w", err)
 	}
-	return readProvider(data), nil
+	return effectiveProvider(readProvider(data)), nil
 }
 
 func Apply(current *config.Profile, target config.Profile, configPath, codexHome, home string) error {
@@ -147,6 +166,7 @@ func Apply(current *config.Profile, target config.Profile, configPath, codexHome
 	updatedConfig := EnsureProviderData(originalConfig, target)
 	if config.NormalizeAuthType(target.AuthType, target.Provider) == "official" {
 		updatedConfig = removeProviderData(originalConfig)
+		updatedConfig = removeProfileProviderData(updatedConfig, target.Name)
 	}
 	if err := writeFileAtomic(configFile, updatedConfig, 0o600); err != nil {
 		return fmt.Errorf("更新 config.toml 失败: %w", err)
@@ -249,6 +269,7 @@ func Test(codexHome, authPath string, profile config.Profile, model string) (str
 	testConfig := EnsureProviderData(configData, profile)
 	if config.NormalizeAuthType(profile.AuthType, profile.Provider) == "official" {
 		testConfig = removeProviderData(configData)
+		testConfig = removeProfileProviderData(testConfig, profile.Name)
 	}
 	if err := writeFileAtomic(filepath.Join(testHome, "config.toml"), testConfig, 0o600); err != nil {
 		return "", fmt.Errorf("准备测试配置失败: %w", err)
@@ -341,10 +362,12 @@ func repairSQLiteIndexes(codexHome, fromProvider, toProvider string) error {
 		}
 		from := strings.ReplaceAll(fromProvider, "'", "''")
 		to := strings.ReplaceAll(toProvider, "'", "''")
-		query := fmt.Sprintf("UPDATE threads SET model_provider='%s' WHERE model_provider='%s'; UPDATE local_thread_catalog SET model_provider='%s' WHERE model_provider='%s';", to, from, to, from)
-		cmd := exec.Command(sqlite, path, query)
-		if output, err := cmd.CombinedOutput(); err != nil && len(output) > 0 && !bytes.Contains(output, []byte("no such table")) {
-			return fmt.Errorf("修复 Codex 会话索引失败: %w", err)
+		for _, table := range []string{"threads", "local_thread_catalog"} {
+			query := fmt.Sprintf("UPDATE %s SET model_provider='%s' WHERE model_provider='%s';", table, to, from)
+			cmd := exec.Command(sqlite, path, query)
+			if output, err := cmd.CombinedOutput(); err != nil && !bytes.Contains(output, []byte("no such table")) {
+				return fmt.Errorf("修复 Codex 会话索引失败: %s: %w", strings.TrimSpace(string(output)), err)
+			}
 		}
 	}
 	return nil
@@ -388,14 +411,17 @@ func ensureProviderTableData(data []byte, profile config.Profile) []byte {
 	}
 	name := strconv.Quote(profile.Provider)
 	baseURL := strconv.Quote(profile.BaseURL)
-	block := fmt.Sprintf("\n[model_providers.%s]\nname = %s\nwire_api = \"responses\"\nrequires_openai_auth = true\nbase_url = %s\n", profile.Provider, name, baseURL)
+	block := fmt.Sprintf("\n[model_providers.%s]\nname = %s\nwire_api = \"responses\"\nrequires_openai_auth = true\nbase_url = %s\n", tomlProviderKey(profile.Provider), name, baseURL)
 	return append(data, []byte(block)...)
 }
 
 func EnsureProfileData(data []byte, profile config.Profile) []byte {
 	section := fmt.Sprintf("[profiles.%s]", strconv.Quote(profile.Name))
-	if bytes.Contains(data, []byte(section)) {
-		return data
+	for _, line := range bytes.Split(data, []byte("\n")) {
+		trimmed := strings.TrimSpace(string(line))
+		if trimmed == section || strings.HasPrefix(trimmed, section+" #") {
+			return data
+		}
 	}
 	block := fmt.Sprintf("\n%s\nmodel_provider = %s\n", section, strconv.Quote(profile.Provider))
 	return append(data, []byte(block)...)
@@ -431,10 +457,46 @@ func removeProviderData(data []byte) []byte {
 	return append(append([]byte{}, data[:start]...), data[end:]...)
 }
 
+func removeProfileProviderData(data []byte, profileName string) []byte {
+	section := fmt.Sprintf("[profiles.%s]", strconv.Quote(profileName))
+	lines := bytes.SplitAfter(data, []byte("\n"))
+	inside := false
+	updated := make([][]byte, 0, len(lines))
+	for _, raw := range lines {
+		trimmed := strings.TrimSpace(string(bytes.TrimSuffix(raw, []byte("\n"))))
+		if strings.HasPrefix(trimmed, "[") {
+			inside = trimmed == section || strings.HasPrefix(trimmed, section+" #")
+		}
+		if inside && profileProviderAssignment.MatchString(trimmed) {
+			continue
+		}
+		updated = append(updated, raw)
+	}
+	return bytes.Join(updated, nil)
+}
+
+var profileProviderAssignment = regexp.MustCompile(`^model_provider\s*=`)
+
 func providerTableExists(data []byte, provider string) bool {
-	quoted := regexp.QuoteMeta(provider)
-	pattern := regexp.MustCompile(`(?m)^\s*\[model_providers\.` + quoted + `\]\s*$`)
-	return pattern.Match(data)
+	quoted := "[model_providers." + strconv.Quote(provider) + "]"
+	bare := "[model_providers." + provider + "]"
+	for _, line := range bytes.Split(data, []byte("\n")) {
+		trimmed := strings.TrimSpace(string(line))
+		if trimmed == quoted || strings.HasPrefix(trimmed, quoted+" #") ||
+			(validBareProvider.MatchString(provider) && (trimmed == bare || strings.HasPrefix(trimmed, bare+" #"))) {
+			return true
+		}
+	}
+	return false
+}
+
+var validBareProvider = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
+
+func tomlProviderKey(provider string) string {
+	if validBareProvider.MatchString(provider) {
+		return provider
+	}
+	return strconv.Quote(provider)
 }
 
 func RemoveSeededAuth(profile config.Profile, configPath, home string) {

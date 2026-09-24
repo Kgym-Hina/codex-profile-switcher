@@ -56,8 +56,17 @@ func (s Service) Switch(name string) error {
 		return err
 	}
 	if current != nil {
-		if err := switcher.RepairHistory(s.CodexHome, current.Provider, target.Provider); err != nil {
-			return fmt.Errorf("修复历史会话归属失败: %w", err)
+		fromProviders := []string{current.Provider, switcher.SessionProvider(*current)}
+		toProvider := switcher.SessionProvider(target)
+		seen := make(map[string]bool)
+		for _, fromProvider := range fromProviders {
+			if fromProvider == "" || fromProvider == toProvider || seen[fromProvider] {
+				continue
+			}
+			seen[fromProvider] = true
+			if err := switcher.RepairHistory(s.CodexHome, fromProvider, toProvider); err != nil {
+				return fmt.Errorf("修复历史会话归属失败: %w", err)
+			}
 		}
 	}
 	return nil
@@ -121,6 +130,16 @@ func (s Service) Add(profile config.Profile) error {
 		}
 		return err
 	}
+	if err := switcher.EnsureProfileConfig(s.CodexHome, profile); err != nil {
+		_ = value.DeleteProfile(profile.Name)
+		if rollbackErr := config.Save(s.ConfigPath, value); rollbackErr != nil {
+			return fmt.Errorf("%v；恢复 profile 配置也失败: %v", err, rollbackErr)
+		}
+		if createdAuth {
+			switcher.RemoveSeededAuth(profile, s.ConfigPath, s.Home)
+		}
+		return err
+	}
 	return nil
 }
 
@@ -152,6 +171,17 @@ func (s Service) Edit(oldName string, profile config.Profile) error {
 		}
 	}
 	if err := config.Save(s.ConfigPath, value); err != nil {
+		if createdAuth {
+			switcher.RemoveSeededAuth(profile, s.ConfigPath, s.Home)
+		}
+		return err
+	}
+	if err := switcher.EnsureProfileConfig(s.CodexHome, profile); err != nil {
+		_ = value.SetProfile(profile.Name, oldProfile)
+		value.ActiveProfile = oldName
+		if rollbackErr := config.Save(s.ConfigPath, value); rollbackErr != nil {
+			return fmt.Errorf("%v；恢复 profile 配置也失败: %v", err, rollbackErr)
+		}
 		if createdAuth {
 			switcher.RemoveSeededAuth(profile, s.ConfigPath, s.Home)
 		}
@@ -206,7 +236,7 @@ func (s Service) load() (*config.Config, error) {
 		if err != nil {
 			return nil, err
 		}
-		if provider == "" || provider == active.Provider {
+		if provider == switcher.SessionProvider(active) || (active.AuthType == "official" && provider == active.Provider) {
 			return value, nil
 		}
 	}

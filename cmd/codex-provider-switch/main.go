@@ -8,6 +8,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
+	"time"
 
 	"codex-profile-switcher/internal/app"
 	"codex-profile-switcher/internal/config"
@@ -92,7 +94,36 @@ func main() {
 func restartCodex() error {
 	switch runtime.GOOS {
 	case "darwin":
-		_ = exec.Command("osascript", "-e", `tell application "Codex" to quit`).Run()
+		oldPIDs, err := codexAppPIDs()
+		if err != nil {
+			return err
+		}
+		if len(oldPIDs) > 0 {
+			if err := exec.Command("osascript", "-e", `tell application "Codex" to quit`).Run(); err != nil {
+				return fmt.Errorf("请求 Codex 退出失败: %w", err)
+			}
+			deadline := time.Now().Add(15 * time.Second)
+			for {
+				activePIDs, err := codexAppPIDs()
+				if err != nil {
+					return err
+				}
+				remaining := false
+				for pid := range oldPIDs {
+					if activePIDs[pid] {
+						remaining = true
+						break
+					}
+				}
+				if !remaining {
+					break
+				}
+				if time.Now().After(deadline) {
+					return fmt.Errorf("等待 Codex 应用退出超时")
+				}
+				time.Sleep(250 * time.Millisecond)
+			}
+		}
 		return exec.Command("open", "-a", "Codex").Start()
 	case "windows":
 		_ = exec.Command("taskkill", "/IM", "codex.exe", "/T", "/F").Run()
@@ -109,6 +140,22 @@ func restartCodex() error {
 		}
 		return exec.Command(path).Start()
 	}
+}
+
+// Match the macOS app process name exactly so Codex CLI processes are ignored.
+func codexAppPIDs() (map[string]bool, error) {
+	output, err := exec.Command("pgrep", "-x", "Codex").Output()
+	if exit, ok := err.(*exec.ExitError); ok && exit.ExitCode() == 1 {
+		return map[string]bool{}, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("检查 Codex 应用进程失败: %w", err)
+	}
+	pids := make(map[string]bool)
+	for _, pid := range strings.Fields(string(output)) {
+		pids[pid] = true
+	}
+	return pids, nil
 }
 
 func parseArgs(args []string) (options, error) {
