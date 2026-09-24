@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 
@@ -94,37 +95,7 @@ func main() {
 func restartCodex() error {
 	switch runtime.GOOS {
 	case "darwin":
-		oldPIDs, err := codexAppPIDs()
-		if err != nil {
-			return err
-		}
-		if len(oldPIDs) > 0 {
-			if err := exec.Command("osascript", "-e", `tell application "Codex" to quit`).Run(); err != nil {
-				return fmt.Errorf("请求 Codex 退出失败: %w", err)
-			}
-			deadline := time.Now().Add(15 * time.Second)
-			for {
-				activePIDs, err := codexAppPIDs()
-				if err != nil {
-					return err
-				}
-				remaining := false
-				for pid := range oldPIDs {
-					if activePIDs[pid] {
-						remaining = true
-						break
-					}
-				}
-				if !remaining {
-					break
-				}
-				if time.Now().After(deadline) {
-					return fmt.Errorf("等待 Codex 应用退出超时")
-				}
-				time.Sleep(250 * time.Millisecond)
-			}
-		}
-		return exec.Command("open", "-a", "Codex").Start()
+		return restartCodexMac()
 	case "windows":
 		_ = exec.Command("taskkill", "/IM", "codex.exe", "/T", "/F").Run()
 		path, err := exec.LookPath("codex.exe")
@@ -142,20 +113,97 @@ func restartCodex() error {
 	}
 }
 
-// Match the macOS app process name exactly so Codex CLI processes are ignored.
-func codexAppPIDs() (map[string]bool, error) {
-	output, err := exec.Command("pgrep", "-x", "Codex").Output()
-	if exit, ok := err.(*exec.ExitError); ok && exit.ExitCode() == 1 {
-		return map[string]bool{}, nil
+func restartCodexMac() error {
+	output, err := exec.Command("osascript", "-e", `POSIX path of (path to application id "com.openai.codex")`).Output()
+	if err != nil {
+		return fmt.Errorf("定位 Codex 应用失败: %w", err)
 	}
+	appPath := filepath.Clean(strings.TrimSpace(string(output)))
+	if appPath == "." || filepath.Ext(appPath) != ".app" {
+		return fmt.Errorf("Codex 应用路径无效: %q", appPath)
+	}
+	pids, err := codexAppPIDs(appPath)
+	if err != nil {
+		return err
+	}
+	for _, pid := range pids {
+		if err := exec.Command("kill", "-9", strconv.Itoa(pid)).Run(); err != nil {
+			active, checkErr := codexAppPIDs(appPath)
+			if checkErr != nil {
+				return checkErr
+			}
+			if containsPID(active, pid) {
+				return fmt.Errorf("强制退出 Codex 应用进程 %d 失败: %w", pid, err)
+			}
+		}
+	}
+	if err := waitForCodexApp(appPath, false, 15*time.Second); err != nil {
+		return err
+	}
+	if err := exec.Command("open", "-n", "-a", appPath).Run(); err != nil {
+		return fmt.Errorf("启动 Codex 应用失败: %w", err)
+	}
+	return waitForCodexApp(appPath, true, 15*time.Second)
+}
+
+func codexAppPIDs(appPath string) ([]int, error) {
+	output, err := exec.Command("ps", "-axo", "pid=,comm=").Output()
 	if err != nil {
 		return nil, fmt.Errorf("检查 Codex 应用进程失败: %w", err)
 	}
-	pids := make(map[string]bool)
-	for _, pid := range strings.Fields(string(output)) {
-		pids[pid] = true
+	return parseAppPIDs(output, appPath), nil
+}
+
+// A direct executable under Contents/MacOS is the app's main process.
+// Codex CLI and Electron helpers under Frameworks are excluded.
+func parseAppPIDs(output []byte, appPath string) []int {
+	mainDir := filepath.Join(appPath, "Contents", "MacOS")
+	var pids []int
+	for _, line := range strings.Split(string(output), "\n") {
+		line = strings.TrimSpace(line)
+		separator := strings.IndexAny(line, " \t")
+		if separator < 0 {
+			continue
+		}
+		pid, err := strconv.Atoi(line[:separator])
+		if err != nil {
+			continue
+		}
+		command := strings.TrimSpace(line[separator:])
+		if filepath.Dir(command) == mainDir {
+			pids = append(pids, pid)
+		}
 	}
-	return pids, nil
+	return pids
+}
+
+func containsPID(pids []int, want int) bool {
+	for _, pid := range pids {
+		if pid == want {
+			return true
+		}
+	}
+	return false
+}
+
+func waitForCodexApp(appPath string, running bool, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for {
+		pids, err := codexAppPIDs(appPath)
+		if err != nil {
+			return err
+		}
+		if (len(pids) > 0) == running {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			if running {
+				return fmt.Errorf("等待 Codex 应用启动超时")
+			}
+			return fmt.Errorf("等待 Codex 应用退出超时")
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
 }
 
 func parseArgs(args []string) (options, error) {

@@ -40,7 +40,7 @@
 - TUI 切换完成后询问是否立即重启 Codex。
 - 支持本次选择“重启”或“不重启”。
 - 支持记住“重启”或“不重启”的偏好，后续切换自动执行。
-- macOS 使用 Codex 应用重启，Windows 使用 `codex.exe`，其他系统使用 `codex` 命令。
+- macOS 根据应用 bundle id 定位 Codex，向应用主进程发送 `kill -9`，确认退出后启动新实例；Windows 使用 `codex.exe`，其他系统使用 `codex` 命令。
 
 ### 命令行和发布
 
