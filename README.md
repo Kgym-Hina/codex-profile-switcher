@@ -20,8 +20,10 @@
 
 - 切换前把当前 `~/.codex/auth.json` 的最新内容写回原 profile 认证文件，避免 token 刷新丢失。
 - 将目标 profile 的认证文件写入当前 `auth.json`。
-- 将目标 provider 写入 `config.toml` 的 `model_provider`。
-- 为 profile 写入 `config.toml` 中对应的 `[profiles."名称"]` 配置；填写 endpoint 时同时创建 `[model_providers.<provider>]` 配置。
+- 第三方 API profile 切换时，将目标 provider 写入 `config.toml` 的 `model_provider`。
+- 新增第三方 API profile 时，才创建对应的 `[profiles."名称"]` 和 `[model_providers.<provider>]` 配置；provider 已存在时保留原有 `name`、`wire_api`、`requires_openai_auth` 和 `base_url`。
+- 官方 profile 不创建 provider block，切换时移除 `model_provider`，只更新当前 `auth.json`。
+- 加载或切换已有 profile 不会把它们重新写入 `config.toml`。
 - 配置、认证文件和 profile 配置均使用原子写入。
 - 切换失败时恢复 profile 标记和 `config.toml`；认证写入失败时恢复原配置。
 - 支持绝对路径、`~/` 路径和相对于 profile 配置文件的认证路径。

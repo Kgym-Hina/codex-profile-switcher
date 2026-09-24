@@ -21,15 +21,38 @@ func TestValidAuthRejectsEmptySnapshots(t *testing.T) {
 	}
 }
 
-func TestEnsureProfileDataWritesAndUpdatesProfile(t *testing.T) {
+func TestEnsureProfileDataWritesOnce(t *testing.T) {
 	profile := config.Profile{Name: "work", Provider: "third-party"}
 	data := []byte("model_provider = \"openai\"\n")
 	data = EnsureProfileData(data, profile)
 	if !strings.Contains(string(data), `[profiles."work"]`) || !strings.Contains(string(data), `model_provider = "third-party"`) {
 		t.Fatalf("profile section was not written: %s", data)
 	}
-	updated := EnsureProfileData(append(data, []byte("\n[profiles.\"other\"]\nmodel_provider = \"openai\"\n")...), config.Profile{Name: "work", Provider: "new-provider"})
-	if strings.Count(string(updated), `[profiles."work"]`) != 1 || !strings.Contains(string(updated), `model_provider = "new-provider"`) {
-		t.Fatalf("profile section was not updated: %s", updated)
+	updated := EnsureProfileData(data, config.Profile{Name: "work", Provider: "new-provider"})
+	if string(updated) != string(data) {
+		t.Fatalf("existing profile section was rewritten: %s", updated)
+	}
+}
+
+func TestProviderConfigRules(t *testing.T) {
+	data := []byte("model_provider = \"old\"\n")
+	api := config.Profile{Provider: "akarin", AuthType: "api", BaseURL: "https://i.zhs.moe:8443"}
+	created := ensureProviderTableData(data, api)
+	for _, want := range []string{
+		`name = "akarin"`,
+		`wire_api = "responses"`,
+		`requires_openai_auth = true`,
+		`base_url = "https://i.zhs.moe:8443"`,
+	} {
+		if !strings.Contains(string(created), want) {
+			t.Errorf("new provider config missing %q: %s", want, created)
+		}
+	}
+	existing := []byte("model_provider = \"old\"\n\n[model_providers.akarin]\nname = \"custom\"\nbase_url = \"https://keep.example\"\n")
+	if string(ensureProviderTableData(existing, api)) != string(existing) {
+		t.Fatal("existing provider configuration was rewritten")
+	}
+	if string(removeProviderData(data)) != "" {
+		t.Fatal("official switch should remove the top-level model_provider")
 	}
 }

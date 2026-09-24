@@ -145,6 +145,9 @@ func Apply(current *config.Profile, target config.Profile, configPath, codexHome
 	}
 
 	updatedConfig := EnsureProviderData(originalConfig, target)
+	if config.NormalizeAuthType(target.AuthType, target.Provider) == "official" {
+		updatedConfig = removeProviderData(originalConfig)
+	}
 	if err := writeFileAtomic(configFile, updatedConfig, 0o600); err != nil {
 		return fmt.Errorf("更新 config.toml 失败: %w", err)
 	}
@@ -225,7 +228,7 @@ func CurrentModel(codexHome string) (string, error) {
 
 // Test sends one harmless hello prompt through the installed Codex CLI using
 // a temporary CODEX_HOME containing the selected profile.
-func Test(codexHome, authPath, provider, model string) (string, error) {
+func Test(codexHome, authPath string, profile config.Profile, model string) (string, error) {
 	model = strings.TrimSpace(model)
 	if model == "" || strings.ContainsAny(model, "\r\n") {
 		return "", fmt.Errorf("模型不能为空且不能包含换行符")
@@ -243,8 +246,11 @@ func Test(codexHome, authPath, provider, model string) (string, error) {
 		return "", fmt.Errorf("创建测试目录失败: %w", err)
 	}
 	defer os.RemoveAll(testHome)
-	testProfile := config.Profile{Provider: provider, BaseURL: ""}
-	if err := writeFileAtomic(filepath.Join(testHome, "config.toml"), EnsureProviderData(configData, testProfile), 0o600); err != nil {
+	testConfig := EnsureProviderData(configData, profile)
+	if config.NormalizeAuthType(profile.AuthType, profile.Provider) == "official" {
+		testConfig = removeProviderData(configData)
+	}
+	if err := writeFileAtomic(filepath.Join(testHome, "config.toml"), testConfig, 0o600); err != nil {
 		return "", fmt.Errorf("准备测试配置失败: %w", err)
 	}
 	if err := writeFileAtomic(filepath.Join(testHome, "auth.json"), authData, 0o600); err != nil {
@@ -370,11 +376,10 @@ func SeedAuth(profile config.Profile, configPath, codexHome, home string) (bool,
 	return true, nil
 }
 
-// EnsureProviderData updates the active provider and records the provider
-// details needed by Codex for a newly-created API profile.
+// EnsureProviderData updates only the active provider selector. Provider
+// tables are created separately when a new API profile is added.
 func EnsureProviderData(data []byte, profile config.Profile) []byte {
-	updated := updateProviderData(data, profile.Provider)
-	return ensureProviderTableData(updated, profile)
+	return updateProviderData(data, profile.Provider)
 }
 
 func ensureProviderTableData(data []byte, profile config.Profile) []byte {
@@ -383,58 +388,23 @@ func ensureProviderTableData(data []byte, profile config.Profile) []byte {
 	}
 	name := strconv.Quote(profile.Provider)
 	baseURL := strconv.Quote(profile.BaseURL)
-	block := fmt.Sprintf("\n[model_providers.%s]\nname = %s\nbase_url = %s\nwire_api = \"responses\"\n", profile.Provider, name, baseURL)
+	block := fmt.Sprintf("\n[model_providers.%s]\nname = %s\nwire_api = \"responses\"\nrequires_openai_auth = true\nbase_url = %s\n", profile.Provider, name, baseURL)
 	return append(data, []byte(block)...)
 }
 
 func EnsureProfileData(data []byte, profile config.Profile) []byte {
 	section := fmt.Sprintf("[profiles.%s]", strconv.Quote(profile.Name))
-	lines := bytes.SplitAfter(data, []byte("\n"))
-	inside := false
-	found := false
-	providerWritten := false
-	for i, raw := range lines {
-		line := bytes.TrimSuffix(raw, []byte("\n"))
-		trimmed := strings.TrimSpace(string(line))
-		if strings.HasPrefix(trimmed, "[") {
-			if inside && found && !providerWritten {
-				insert := []byte("model_provider = " + strconv.Quote(profile.Provider) + "\n")
-				lines = append(lines[:i], append([][]byte{insert}, lines[i:]...)...)
-				return bytes.Join(lines, nil)
-			}
-			inside = trimmed == section
-			if inside {
-				found = true
-				providerWritten = false
-			}
-			continue
-		}
-		if !inside {
-			continue
-		}
-		if strings.HasPrefix(trimmed, "model_provider") {
-			newline := []byte("model_provider = " + strconv.Quote(profile.Provider))
-			if bytes.HasSuffix(raw, []byte("\n")) {
-				newline = append(newline, '\n')
-			}
-			lines[i] = newline
-			providerWritten = true
-		}
-	}
-	if found && providerWritten {
-		return bytes.Join(lines, nil)
-	}
-	if found {
-		if len(lines) > 0 && !bytes.HasSuffix(lines[len(lines)-1], []byte("\n")) {
-			lines[len(lines)-1] = append(lines[len(lines)-1], '\n')
-		}
-		return bytes.Join(append(lines, []byte("model_provider = "+strconv.Quote(profile.Provider)+"\n")), nil)
+	if bytes.Contains(data, []byte(section)) {
+		return data
 	}
 	block := fmt.Sprintf("\n%s\nmodel_provider = %s\n", section, strconv.Quote(profile.Provider))
 	return append(data, []byte(block)...)
 }
 
 func EnsureProfileConfig(codexHome string, profile config.Profile) error {
+	if config.NormalizeAuthType(profile.AuthType, profile.Provider) == "official" {
+		return nil
+	}
 	path := filepath.Join(codexHome, "config.toml")
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -448,6 +418,17 @@ func EnsureProfileConfig(codexHome string, profile config.Profile) error {
 		return nil
 	}
 	return writeFileAtomic(path, updated, 0o600)
+}
+
+func removeProviderData(data []byte) []byte {
+	start, end := topLevelProviderLine(data)
+	if start < 0 {
+		return data
+	}
+	if end < len(data) && data[end] == '\n' {
+		end++
+	}
+	return append(append([]byte{}, data[:start]...), data[end:]...)
 }
 
 func providerTableExists(data []byte, provider string) bool {
